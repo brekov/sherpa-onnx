@@ -26,6 +26,7 @@ struct TokenIDs {
   std::string ToString() const;
 
   std::vector<int64_t> tokens;
+  std::string words;
 
   // Used only in MeloTTS
   std::vector<int64_t> tones;

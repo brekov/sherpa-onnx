@@ -12,6 +12,7 @@ namespace sherpa_onnx {
 std::string TokenIDs::ToString() const {
   std::ostringstream os;
   os << "TokenIDs(";
+  os << "words=[" << words << "], ";
   os << "tokens=[";
   std::string sep;
   for (auto i : tokens) {

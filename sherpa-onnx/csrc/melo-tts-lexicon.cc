@@ -53,24 +53,24 @@ class MeloTtsLexicon::Impl {
     // see
     // https://github.com/Plachtaa/VITS-fast-fine-tuning/blob/main/text/mandarin.py#L244
     std::regex punct_re{"：|、|；"};
-    std::string s = std::regex_replace(text, punct_re, ",");
+    text = std::regex_replace(text, punct_re, ",");
 
     std::regex punct_re2("。");
-    s = std::regex_replace(s, punct_re2, ".");
+    text = std::regex_replace(text, punct_re2, ".");
 
     std::regex punct_re3("？");
-    s = std::regex_replace(s, punct_re3, "?");
+    text = std::regex_replace(text, punct_re3, "?");
 
     std::regex punct_re4("！");
-    s = std::regex_replace(s, punct_re4, "!");
+    text = std::regex_replace(text, punct_re4, "!");
 
     std::vector<std::string> words;
     bool is_hmm = true;
     jieba_->Cut(text, words, is_hmm);
 
     if (debug_) {
-      SHERPA_ONNX_LOGE("input text: %s", text.c_str());
-      SHERPA_ONNX_LOGE("after replacing punctuations: %s", s.c_str());
+      SHERPA_ONNX_LOGE("input text: %s", _text.c_str());
+      SHERPA_ONNX_LOGE("after replacing punctuations: %s", text.c_str());
 
       std::ostringstream os;
       std::string sep = "";
@@ -85,120 +85,62 @@ class MeloTtsLexicon::Impl {
     std::vector<TokenIDs> ans;
     TokenIDs this_sentence;
 
-    for (const auto &w : words) {
-      auto ids = ConvertWordToIds(w);
+    for (int index = 0; index < words.size(); index++) {
+      const auto &word = words[index];
+      auto ids = ConvertWordToIds(word);
+      this_sentence.words += word;
       if (ids.tokens.empty()) {
-        SHERPA_ONNX_LOGE("Ignore OOV '%s'", w.c_str());
+        SHERPA_ONNX_LOGE("Ignore OOV '%s'", word.c_str());
         continue;
       }
-
       this_sentence.tokens.insert(this_sentence.tokens.end(),
                                   ids.tokens.begin(), ids.tokens.end());
       this_sentence.tones.insert(this_sentence.tones.end(), ids.tones.begin(),
                                  ids.tones.end());
 
-      if (w == "." || w == "!" || w == "?" || w == "," || w == "。" ||
-          w == "！" || w == "？" || w == "，") {
+      std::string next_word;
+      int next_length = 0;
+      if (index + 1 < words.size()) {
+        next_word = words[index + 1];
+        next_length = ConvertWordToIds(next_word).tokens.size();
+      } else {
+          next_word = "";
+          next_length = 0;
+      }
+
+      bool next_next_is_punct = false;
+      if (index + 2 < words.size()) {
+        next_word = words[index + 2];
+        next_next_is_punct = next_word == "." || next_word == "!" || next_word == "?" || next_word == ",";
+      }
+
+      bool is_punct = word == "." || word == "!" || word == "?" || word == ",";
+      auto size = this_sentence.tokens.size();
+      // 超过 40 音素  || 加上下个词语超过 47 音素且再后面不是标点 || 35 个音素遇上标点
+      if (size > 41 || ((size + next_length >= 47) && !next_next_is_punct) || (size > 35 && is_punct)) {
+        SHERPA_ONNX_LOGE("FGGG .size = %zu .words = %s next_length = %d next_words = %s",
+                         size, this_sentence.words.c_str(), next_length, next_word.c_str());
         ans.push_back(std::move(this_sentence));
         this_sentence = {};
       }
-    }  // for (const auto &w : words)
+    }
 
     if (!this_sentence.tokens.empty()) {
-      ans.push_back(std::move(this_sentence));
+      if (!ans.empty() && this_sentence.tokens.size() < 7) {
+        auto last = ans.back();
+        last.words += this_sentence.words;
+        ans.pop_back();
+        last.tokens.insert(last.tokens.end(), this_sentence.tokens.begin(), this_sentence.tokens.end());
+        last.tones.insert(last.tones.end(), this_sentence.tones.begin(), this_sentence.tones.end());
+        SHERPA_ONNX_LOGE("FGGG append to last .size = %zu .words = %s", this_sentence.tokens.size(), this_sentence.words.c_str());
+        ans.push_back(std::move(last));
+      } else {
+        SHERPA_ONNX_LOGE("FGGG .size = %zu .words = %s", this_sentence.tokens.size(), this_sentence.words.c_str());
+        ans.push_back(std::move(this_sentence));
+      }
     }
-
     return ans;
   }
-
-    size_t count_utf8_chars(const std::string& str) const {
-        size_t count = 0;
-        size_t i = 0;
-        while (i < str.size()) {
-            unsigned char c = str[i];
-            if (c <= 0x7F) {
-                // 1 byte character (ASCII)
-                i += 1;
-            } else if (c <= 0xDF) {
-                // 2 byte character
-                i += 2;
-            } else if (c <= 0xEF) {
-                // 3 byte character (common for Chinese characters)
-                i += 3;
-            } else if (c <= 0xF7) {
-                // 4 byte character (less common)
-                i += 4;
-            }
-            count++;
-        }
-        return count;
-    }
-
-    std::vector<TokenIDs> ConvertTextToTokenIds_2(const std::string &_text) const {
-        std::string text = ToLowerCase(_text);
-        // see
-        // https://github.com/Plachtaa/VITS-fast-fine-tuning/blob/main/text/mandarin.py#L244
-        std::regex punct_re{"：|、|；"};
-        text = std::regex_replace(text, punct_re, ",");
-
-        std::regex punct_re2("。");
-        text = std::regex_replace(text, punct_re2, ".");
-
-        std::regex punct_re3("？");
-        text = std::regex_replace(text, punct_re3, "?");
-
-        std::regex punct_re4("！");
-        text = std::regex_replace(text, punct_re4, "!");
-
-        std::vector<std::string> words;
-        bool is_hmm = true;
-        jieba_->Cut(text, words, is_hmm);
-
-        if (debug_) {
-            SHERPA_ONNX_LOGE("input text: %s", _text.c_str());
-            SHERPA_ONNX_LOGE("after replacing punctuations: %s", text.c_str());
-
-            std::ostringstream os;
-            std::string sep = "";
-            for (const auto &w : words) {
-                os << sep << w;
-                sep = "_";
-            }
-
-            SHERPA_ONNX_LOGE("after jieba processing: %s", os.str().c_str());
-        }
-
-        std::vector<TokenIDs> ans;
-        TokenIDs this_sentence;
-
-        int remaining_count = count_utf8_chars(text);
-        int word_count = 0;
-        for (const auto &word: words) {
-            auto ids = ConvertWordToIds(word);
-            if (ids.tokens.empty()) {
-                SHERPA_ONNX_LOGE("Ignore OOV '%s'", word.c_str());
-                continue;
-            }
-            this_sentence.tokens.insert(this_sentence.tokens.end(),
-                                        ids.tokens.begin(), ids.tokens.end());
-            this_sentence.tones.insert(this_sentence.tones.end(), ids.tones.begin(),
-                                       ids.tones.end());
-            int word_len = count_utf8_chars(word);
-            word_count += word_len;
-            remaining_count -= word_len;
-            if (word_count > 5 && remaining_count >= 5) {
-                ans.push_back(std::move(this_sentence));
-                this_sentence = {};
-                word_count = 0;
-            }
-        }
-
-        if (!this_sentence.tokens.empty()) {
-            ans.push_back(std::move(this_sentence));
-        }
-
-        return ans;
-    }
 
  private:
   TokenIDs ConvertWordToIds(const std::string &w) const {
@@ -330,8 +272,8 @@ class MeloTtsLexicon::Impl {
           {std::move(word), TokenIDs{std::move(ids64), std::move(tone_list)}});
     }
 
-//    word2ids_["呣"] = word2ids_["母"];
-//    word2ids_["嗯"] = word2ids_["恩"];
+    word2ids_["呣"] = word2ids_["母"];
+    word2ids_["嗯"] = word2ids_["恩"];
   }
 
  private:
@@ -359,7 +301,7 @@ MeloTtsLexicon::MeloTtsLexicon(const std::string &lexicon,
 
 std::vector<TokenIDs> MeloTtsLexicon::ConvertTextToTokenIds(
     const std::string &text, const std::string & /*unused_voice = ""*/) const {
-  return impl_->ConvertTextToTokenIds_2(text);
+  return impl_->ConvertTextToTokenIds(text);
 }
 
 }  // namespace sherpa_onnx

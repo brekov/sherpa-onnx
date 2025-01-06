@@ -8,6 +8,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <chrono>
 
 #if __ANDROID_API__ >= 9
 #include <strstream>
@@ -169,9 +170,9 @@ class OfflineTtsVitsImpl : public OfflineTtsImpl {
     if (!tn_list_.empty()) {
       for (const auto &tn : tn_list_) {
         text = tn->Normalize(text);
-        if (config_.model.debug) {
-          SHERPA_ONNX_LOGE("After normalizing: %s", text.c_str());
-        }
+      }
+      if (config_.model.debug) {
+        SHERPA_ONNX_LOGE("After normalizing: %s", text.c_str());
       }
     }
 
@@ -184,26 +185,23 @@ class OfflineTtsVitsImpl : public OfflineTtsImpl {
       return {};
     }
 
-    std::vector<std::vector<int64_t>> x;
+    std::vector<std::vector<int64_t>> tokens;
     std::vector<std::vector<int64_t>> tones;
+    std::vector<std::string> words;
 
-    x.reserve(token_ids.size());
+    tokens.reserve(token_ids.size());
+    tones.reserve(token_ids.size());
 
-    for (auto &i : token_ids) {
-      x.push_back(std::move(i.tokens));
-    }
-
-    if (!token_ids[0].tones.empty()) {
-      tones.reserve(token_ids.size());
-      for (auto &i : token_ids) {
-        tones.push_back(std::move(i.tones));
-      }
+    for (auto &token_id : token_ids) {
+        tokens.push_back(std::move(token_id.tokens));
+        tones.push_back(std::move(token_id.tones));
+        words.push_back(std::move(token_id.words));
     }
 
     // TODO(fangjun): add blank inside the frontend, not here
     if (meta_data.add_blank && config_.model.vits.data_dir.empty() &&
         meta_data.frontend != "characters") {
-      for (auto &k : x) {
+      for (auto &k : tokens) {
         k = AddBlank(k);
       }
 
@@ -212,10 +210,10 @@ class OfflineTtsVitsImpl : public OfflineTtsImpl {
       }
     }
 
-    int32_t x_size = static_cast<int32_t>(x.size());
+    int32_t size = static_cast<int32_t>(tokens.size());
 
-    if (config_.max_num_sentences <= 0 || x_size <= config_.max_num_sentences) {
-      auto ans = Process(x, tones, sid, speed);
+    if (config_.max_num_sentences <= 0 || size <= config_.max_num_sentences) {
+      auto ans = Process(tokens, tones, sid, speed);
       if (callback) {
         callback(ans.samples.data(), ans.samples.size(), 1.0);
       }
@@ -224,74 +222,49 @@ class OfflineTtsVitsImpl : public OfflineTtsImpl {
 
     // the input text is too long, we process sentences within it in batches
     // to avoid OOM. Batch size is config_.max_num_sentences
-    std::vector<std::vector<int64_t>> batch_x;
+    std::vector<std::vector<int64_t>> batch_tokens;
     std::vector<std::vector<int64_t>> batch_tones;
+    std::string batch_words;
 
     int32_t batch_size = config_.max_num_sentences;
-    batch_x.reserve(config_.max_num_sentences);
-    batch_tones.reserve(config_.max_num_sentences);
-    int32_t num_batches = x_size / batch_size;
-
-    if (config_.model.debug) {
-      SHERPA_ONNX_LOGE(
-          "Text is too long. Split it into %d batches. batch size: %d. Number "
-          "of sentences: %d",
-          num_batches, batch_size, x_size);
-    }
-
-    GeneratedAudio ans;
+    batch_tokens.reserve(batch_size);
+    batch_tones.reserve(batch_size);
+    int32_t batch_count = size / batch_size;
 
     int32_t should_continue = 1;
+    int32_t index = 0;
+    GeneratedAudio ans;
 
-    int32_t k = 0;
 
-    for (int32_t b = 0; b != num_batches && should_continue; ++b) {
-      batch_x.clear();
+    SHERPA_ONNX_LOGE("FGGG Process start ---------------");
+    for (int m = 0; m <= batch_count && should_continue; ++m) {
+      batch_tokens.clear();
       batch_tones.clear();
-      for (int32_t i = 0; i != batch_size; ++i, ++k) {
-        batch_x.push_back(std::move(x[k]));
+      batch_words.clear();
 
+      for (int n = 0; n < batch_size && index < size; ++n, ++index) {
+        batch_words += words[index];
+        batch_tokens.push_back(std::move(tokens[index]));
         if (!tones.empty()) {
-          batch_tones.push_back(std::move(tones[k]));
+          batch_tones.push_back(std::move(tones[index]));
         }
       }
-
-      auto audio = Process(batch_x, batch_tones, sid, speed);
-      ans.sample_rate = audio.sample_rate;
-      ans.samples.insert(ans.samples.end(), audio.samples.begin(),
-                         audio.samples.end());
-      if (callback) {
-        should_continue = callback(audio.samples.data(), audio.samples.size(),
-                                   b * 1.0 / num_batches);
-        // Caution(fangjun): audio is freed when the callback returns, so users
-        // should copy the data if they want to access the data after
-        // the callback returns to avoid segmentation fault.
+      if (!batch_tokens.empty()) {
+        SHERPA_ONNX_LOGE("FGGGG Process .size = %zu .words = %s", batch_tokens.size(), batch_words.c_str());
+        auto start = std::chrono::high_resolution_clock::now();
+        auto [samples, sample_rate] = Process(batch_tokens, batch_tones, sid, speed);
+        ans.sample_rate = sample_rate;
+        ans.samples.insert(ans.samples.end(), samples.begin(), samples.end());
+        if (callback) {
+          auto length = static_cast<double>(samples.size()) * 1000 / 44100;
+          should_continue = callback(samples.data(), samples.size(), index * 100.0 / size);
+          auto end = std::chrono::high_resolution_clock::now();
+          auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+          SHERPA_ONNX_LOGE("FGGGG Processed play = %lld process = %lld .words = %s", static_cast<long>(length), duration.count(), batch_words.c_str());
+        }
       }
     }
-
-    batch_x.clear();
-    batch_tones.clear();
-    while (k < static_cast<int32_t>(x.size()) && should_continue) {
-      batch_x.push_back(std::move(x[k]));
-      if (!tones.empty()) {
-        batch_tones.push_back(std::move(tones[k]));
-      }
-
-      ++k;
-    }
-
-    if (!batch_x.empty()) {
-      auto audio = Process(batch_x, batch_tones, sid, speed);
-      ans.sample_rate = audio.sample_rate;
-      ans.samples.insert(ans.samples.end(), audio.samples.begin(),
-                         audio.samples.end());
-      if (callback) {
-        callback(audio.samples.data(), audio.samples.size(), 1.0);
-        // Caution(fangjun): audio is freed when the callback returns, so users
-        // should copy the data if they want to access the data after
-        // the callback returns to avoid segmentation fault.
-      }
-    }
+    SHERPA_ONNX_LOGE("FGGGG Process end ---------------");
 
     return ans;
   }
@@ -428,8 +401,7 @@ class OfflineTtsVitsImpl : public OfflineTtsImpl {
           model_->Run(std::move(x_tensor), std::move(tones_tensor), sid, speed);
     }
 
-    std::vector<int64_t> audio_shape =
-        audio.GetTensorTypeAndShapeInfo().GetShape();
+    std::vector<int64_t> audio_shape = audio.GetTensorTypeAndShapeInfo().GetShape();
 
     int64_t total = 1;
     // The output shape may be (1, 1, total) or (1, total) or (total,)
